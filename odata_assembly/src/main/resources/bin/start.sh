@@ -22,7 +22,7 @@ JVM_OPTIONS="-Xrs -Xms256m -Xmx512m"
 
 BASEDIR=$(dirname $0)
 CLASS_PATH=.:config:bin
-LIB_DIR="lib/*"
+LIB_DIR="/home/colin/odata/odata_assembly/target/odata_assembly/lib/*"
 ADDONS_DIR="addons/*"
 CLASS_NAME="com.sdl.odata.container.ODataServiceContainer"
 PID_FILE="sdlwebdata.pid"
