@@ -9,3 +9,4 @@ target/
 classes/
 src/test/java/META-INF/
 **/*.suo
+.env

@@ -15,9 +15,10 @@
  */
 package com.sdl.odata.processor;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sdl.odata.api.ODataBadRequestException;
 import com.sdl.odata.api.ODataException;
-import com.sdl.odata.api.ODataNotImplementedException;
 import com.sdl.odata.api.edm.model.EntityDataModel;
 import com.sdl.odata.api.parser.MetadataUri;
 import com.sdl.odata.api.parser.ODataUri;
@@ -30,9 +31,7 @@ import com.sdl.odata.api.processor.ProcessorResult;
 import com.sdl.odata.api.processor.datasource.ODataDataSourceException;
 import com.sdl.odata.api.processor.datasource.ODataEntityNotFoundException;
 import com.sdl.odata.api.processor.datasource.factory.DataSourceFactory;
-import com.sdl.odata.api.processor.query.ODataQuery;
 import com.sdl.odata.api.processor.query.QueryResult;
-import com.sdl.odata.api.processor.query.strategy.QueryOperationStrategy;
 import com.sdl.odata.api.service.ODataRequestContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,6 +42,17 @@ import scala.Option;
 import java.util.List;
 
 import static com.sdl.odata.api.service.ODataResponse.Status.OK;
+
+import com.looker.rtl.AuthSession;
+import com.looker.rtl.ConfigurationProvider;
+import com.looker.rtl.Transport;
+import com.looker.sdk.ApiSettings;
+import com.looker.sdk.LookerSDK;
+import com.looker.rtl.SDKResponse;
+import io.github.cdimascio.dotenv.Dotenv;
+import java.util.HashMap;
+import java.util.Map;
+import java.io.IOException;
 
 /**
  * Implementation of {@code ODataQueryProcessor}.
@@ -76,31 +86,55 @@ public class ODataQueryProcessorImpl implements ODataQueryProcessor {
 
         TargetType targetType = targetTypeOption.get();
 
-        ODataQuery query = new QueryModelBuilder(requestContext.getEntityDataModel()).build(requestContext);
-        LOG.trace("Query model: {}", query);
+        // Load settings from .env file into system properties
+        Dotenv dotenv = Dotenv.load();
+        dotenv.entries().forEach(e -> System.setProperty(e.getKey(), e.getValue()));
 
-        QueryOperationStrategy strategy = dataSourceFactory.getStrategy(requestContext, query.operation(), targetType);
-        if (strategy == null) {
-            throw new ODataNotImplementedException("This query is not supported: " +
-                    requestContext.getRequest().getUri());
-        }
+        // Setup the settings from system properties
+        ConfigurationProvider settings = ApiSettings.fromMap(new HashMap<>());
+        settings.readConfig();
+        AuthSession session = new AuthSession(settings, new Transport(settings));
+        LookerSDK looker = new LookerSDK(session);
 
-        QueryResult result;
+        // Fetch results of the query using query_id and result_format
+        String queryId = "703707";
+        String resultFormat = "json";
+        SDKResponse sdkResponse = looker.run_query(resultFormat, queryId);
 
-        try {
-            result = strategy.execute();
-        } catch (Exception e) {
-            LOG.error("Unexpected Exception when executing query " + query, e);
-            throw e;
-        }
-        if (targetType.isCollection()) {
-            if (result.getType() == QueryResult.ResultType.COLLECTION ||
-                    result.getType() == QueryResult.ResultType.RAW_JSON) {
-                return new ProcessorResult(OK, result);
+        // Handle the SDKResponse
+        String lookerResults;
+        if (sdkResponse instanceof SDKResponse.SDKSuccessResponse) {
+            SDKResponse.SDKSuccessResponse successResponse = (SDKResponse.SDKSuccessResponse) sdkResponse;
+            // Unpack the body of a successful SDKResponse as a string
+            try {
+                lookerResults = successResponse.toString();
+            } catch (Exception e) {
+                throw new ODataDataSourceException("Error unpacking SDKResponse: " + e.getMessage(), e);
             }
-            throw new ODataDataSourceException("Expected a collection result, but found " +
-                        result.getType().name() + " for this query: " +
-                        result.getType().name(), requestContext.getRequest().getUri());
+        } else if (sdkResponse instanceof SDKResponse.SDKErrorResponse) {
+            SDKResponse.SDKErrorResponse errorResponse = (SDKResponse.SDKErrorResponse) sdkResponse;
+            throw new ODataDataSourceException("Error response from Looker: " + errorResponse);
+        } else if (sdkResponse instanceof SDKResponse.SDKError) {
+            SDKResponse.SDKError error = (SDKResponse.SDKError) sdkResponse;
+            throw new ODataDataSourceException("SDK Error: " + error);
+        } else {
+            throw new IllegalArgumentException("Unknown response type");
+        }
+
+        // Parse the JSON string to a List<Map<String, Object>>
+        List<Map<String, Object>> parsedResults;
+        try {
+            parsedResults = new ObjectMapper()
+                .readValue(lookerResults, new TypeReference<List<Map<String, Object>>>() { });
+        } catch (IOException e) {
+            throw new ODataDataSourceException("Error parsing Looker results: " + e.getMessage(), e);
+        }
+
+        // Process Looker results
+        QueryResult result = QueryResult.from(parsedResults);
+
+        if (targetType.isCollection()) {
+            return new ProcessorResult(OK, result);
         } else {
             if (result.getType() != QueryResult.ResultType.COLLECTION) {
                 return new ProcessorResult(OK, result);
